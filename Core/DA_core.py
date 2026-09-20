@@ -21,7 +21,7 @@ import models.improved_sudormrf as improved_sudormrf
 
 
 class DA(nn.Module):
-    """Shared domain classifier D operating on GAP representations."""
+   
 
     def __init__(self, in_channels=256, hidden_dim=128):
         super(DA, self).__init__()
@@ -37,7 +37,7 @@ class DA(nn.Module):
 
 
 class GradientReversal(Function):
-    """Identity in the forward pass and gradient reversal in backpropagation."""
+
 
     @staticmethod
     def forward(ctx, x, alpha):
@@ -186,7 +186,7 @@ def domain_adversarial_forward(
     batch_index,
     len_dataloader,
 ):
-    """Run the two student paths and compute the averaged domain loss."""
+    
 
     if epoch < 100:
         p = float(batch_index + epoch * len_dataloader) / float(
@@ -221,6 +221,6 @@ def domain_adversarial_forward(
 
 
 def add_domain_loss(mt_loss, domain_loss):
-    """Add the DA term to the existing Mean Teacher objective."""
+
 
     return mt_loss + 0.05 * domain_loss
