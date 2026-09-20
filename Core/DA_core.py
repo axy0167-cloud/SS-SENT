@@ -1,8 +1,13 @@
 """Core domain-adversarial (DA) components used in SS-SENet.
 
-This file consolidates the DA-related code from ``Discriminator.py`` and
-``main_MT+DA(1).py``. Evaluation, logging, checkpointing, MT losses, GGCA,
-and DSAM are intentionally omitted.
+The implementation follows the paper formulation:
+
+    F_E(x) -> GRL -> GAP -> shared domain classifier D.
+
+Labeled mixtures are assigned domain label 0 and remixed unlabeled mixtures
+are assigned domain label 1. The two domain losses are averaged and weighted
+by 0.05 in the total student objective. Evaluation, logging, checkpointing,
+GGCA, and DSAM are intentionally omitted.
 """
 
 import numpy as np
@@ -16,47 +21,19 @@ import models.improved_sudormrf as improved_sudormrf
 
 
 class DA(nn.Module):
-    """Domain classifier operating on bottleneck features."""
+    """Shared domain classifier D operating on GAP representations."""
 
-    def __init__(self, in_channels=256, out_channels=2, bottleneck_dim=128):
+    def __init__(self, in_channels=256, hidden_dim=128):
         super(DA, self).__init__()
-
-        self.features = nn.Sequential(
-            spectral_norm(
-                nn.Conv1d(
-                    in_channels,
-                    bottleneck_dim,
-                    kernel_size=4,
-                    stride=2,
-                    padding=1,
-                )
-            ),
-            nn.GroupNorm(8, bottleneck_dim),
-            nn.LeakyReLU(0.2, inplace=True),
-            spectral_norm(
-                nn.Conv1d(
-                    bottleneck_dim,
-                    in_channels,
-                    kernel_size=1,
-                    stride=1,
-                )
-            ),
-            nn.GroupNorm(8, in_channels),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-
         self.fc = nn.Sequential(
-            spectral_norm(nn.Linear(in_channels, 128)),
+            spectral_norm(nn.Linear(in_channels, hidden_dim)),
             nn.Dropout(0.3),
             nn.LeakyReLU(0.2, inplace=True),
-            spectral_norm(nn.Linear(128, out_channels)),
+            spectral_norm(nn.Linear(hidden_dim, 1)),
         )
 
     def forward(self, x):
-        x = self.features(x)
-        x_gap = torch.mean(x, dim=-1)
-        out = self.fc(x_gap)
-        return out, x_gap
+        return torch.sigmoid(self.fc(x).squeeze(-1))
 
 
 class GradientReversal(Function):
@@ -103,10 +80,7 @@ class SuDORMRF_DA(improved_sudormrf.SuDORMRF):
         self.model_type = model
 
         if model == "student":
-            self.classifier = DA(
-                in_channels=out_channels,
-                out_channels=2,
-            )
+            self.classifier = DA(in_channels=out_channels)
         elif model != "teacher":
             raise ValueError(
                 f"model must be 'student' or 'teacher', got {model}"
@@ -131,27 +105,32 @@ class SuDORMRF_DA(improved_sudormrf.SuDORMRF):
         domain_features = None
 
         if mode == "train" and hasattr(self, "classifier"):
+            # P_i^r = GAP(R_lambda(F_E(x_i^r))).
             reversed_features = GradientReversal.apply(x, alpha)
-            domain_logits, domain_features = self.classifier(reversed_features)
+            domain_features = torch.mean(reversed_features, dim=-1)
+            domain_probability = self.classifier(domain_features)
 
             batch_size = x.shape[0]
 
             if domain_type == "label":
                 domain_targets = torch.zeros(
                     batch_size,
-                    dtype=torch.long,
+                    dtype=domain_probability.dtype,
                     device=x.device,
                 )
             elif domain_type == "unlabel":
                 domain_targets = torch.ones(
                     batch_size,
-                    dtype=torch.long,
+                    dtype=domain_probability.dtype,
                     device=x.device,
                 )
             else:
                 raise ValueError(f"Unsupported domain_type: {domain_type}")
 
-            domain_loss = F.cross_entropy(domain_logits, domain_targets)
+            domain_loss = F.binary_cross_entropy(
+                domain_probability,
+                domain_targets,
+            )
 
         x = self.sm(x)
         x = self.mask_net(x)
@@ -231,9 +210,7 @@ def domain_adversarial_forward(
         domain_type="unlabel",
     )
 
-    domain_loss = torch.mean(
-        0.5 * (domain_loss_label + domain_loss_unlabel)
-    )
+    domain_loss = 0.5 * (domain_loss_label + domain_loss_unlabel)
 
     return (
         student_estimates_label,
